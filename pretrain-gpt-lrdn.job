@@ -23,6 +23,7 @@
 # Usage:
 #     sbatch pretrain-gpt-lrnd.sh
 
+
 ######################################################################
 # ENVIRONMENT SETUP AND GENERAL CONFIGURATION
 ######################################################################
@@ -34,40 +35,6 @@ set -euo pipefail
 # Modules are needed with the container we are using.
 module purge
 module load python/3.11.7 nccl/2.22.3-1--gcc--12.2.0-cuda-12.2-spack0.22
-
-# PATHS
-export PROJECT_SPACE="/leonardo_work/AIFAC_L01_028/donutu00"
-if [ -z "$PROJECT_SPACE" ]; then
-  echo "Error: PROJECT_SPACE is not set. Please set the project space path in this script. Example: export PROJECT_SPACE=/projects/0/prjsXXXX"
-  exit 1
-fi
-
-BASE_DIR="/leonardo_work/AIFAC_L01_028/donutu00/configs-megatron" #$SLURM_SUBMIT_DIR"
-OUTPUT_DIR="/$SCRATCH/Megatron-LM/output"
-CHECKPOINT_PATH="$OUTPUT_DIR/checkpoints"
-TENSORBOARD_DIR="$OUTPUT_DIR/tensorboard/$SLURM_JOB_NAME-$SLURM_JOBID"
-
-mkdir -p "$OUTPUT_DIR" "$CHECKPOINT_PATH"    # This needs to exist
-
-CONTAINER=$PROJECT_SPACE/containers/megatron-torch-2.7-nvcr.25-04.sif
-
-# Script that is used to launch on GPU nodes
-LAUNCH_SCRIPT="/leonardo_work/AIFAC_L01_028/donutu00/configs-megatron/launch.sh"
-
-# Directories to map into container
-BIND_DIRS="$SCRATCH,$PROJECT_SPACE"
-
-# DATA
-DATA_PATH="$PROJECT_SPACE/datasets/FineWeb/fineweb-10BT_text_document" # gpt-2
-# DATA_PATH="$PROJECT_SPACE/datasets/FineWeb/fineweb-10BT-llama3_text_document" # llama 3
-# TOKENIZER_MODEL="gpt2"
-TOKENIZER_MODEL="$PROJECT_SPACE/tokenizers/models--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e"
-# TOKENIZER_MODEL="$PROJECT_SPACE/tokenizers/models--meta-llama--Meta-Llama-3.1-8B-Instruct/snapshots/8c22764a7e3675c50d4c7c9a4edb474456022b16" # llama3
-DATA_CACHE_PATH="$SCRATCH/megatron_cache"
-
-export TRITON_CACHE_DIR=$SCRATCH/triton_cache
-export TRITON_LIBCUDA_PATH=$SCRATCH/local/cuda/compat/lib.real/libcuda.so.1
-
 # Avoid conflicts with $HOME/.local
 export PYTHONUSERBASE=""
 
@@ -76,17 +43,62 @@ export CC=gcc
 export CXX=g++
 
 
+######################################################################
+# VARIABLE DEFINITIONS
+######################################################################
+
+export WANDB_ENTITY=oellm-team
+WANDB_PROJECT="dense"
+N_PARAMS="1.31"
+
+
+# PATHS
+export PROJECT_SPACE="$WORK/$USER"
+
+if [ -z "$PROJECT_SPACE" ]; then
+  echo "Error: PROJECT_SPACE is not set. Please set the project space path in this script. Example: export PROJECT_SPACE=/projects/0/prjsXXXX"
+  exit 1
+fi
+
+MEGATRON_PATH="$PROJECT_SPACE/Megatron-LM"
+OUTPUT_DIR="$SCRATCH/megatron"
+CONTAINER=$PROJECT_SPACE/containers/megatron-torch-2.7-nvcr.25-04.sif
+MEGATRON_CACHE_FOLDER="${OUTPUT_DIR}/megatron_cache"
+CHECKPOINT_PATH="$OUTPUT_DIR/checkpoints"
+TENSORBOARD_DIR="$OUTPUT_DIR/tensorboard/$SLURM_JOB_NAME-$SLURM_JOBID"
+WANDB_DIR="$OUTPUT_DIR/wandb/$SLURM_JOB_NAME-$SLURM_JOBID"
+
+mkdir -p "$OUTPUT_DIR" "$CHECKPOINT_PATH" "$MEGATRON_CACHE_FOLDER"   # This needs to exist
+
+# DATA
+DATA_PATH="$PROJECT_SPACE/datasets/FineWeb/fineweb-10BT_text_document" # gpt-2
+# DATA_PATH="$PROJECT_SPACE/datasets/FineWeb/fineweb-10BT-llama3_text_document" # llama 3
+# TOKENIZER_MODEL="gpt2"
+TOKENIZER_MODEL="$PROJECT_SPACE/tokenizers/models--gpt2/snapshots/607a30d783dfa663caf39e06633721c8d4cfcd7e"
+# TOKENIZER_MODEL="$PROJECT_SPACE/tokenizers/models--meta-llama--Meta-Llama-3.1-8B-Instruct/snapshots/8c22764a7e3675c50d4c7c9a4edb474456022b16" # llama3
+
+# Directories to map into container
+BIND_DIRS="$OUTPUT_DIR,$PROJECT_SPACE,$MEGATRON_PATH"
+
+# Apptainer cache
+export APPTAINER_CACHEDIR="${MEGATRON_CACHE_FOLDER}/APPTAINER_CACHEDIR"
+export APPTAINER_TMPDIR="${MEGATRON_CACHE_FOLDER}/APPTAINER_TMPDIR"
+mkdir -p $APPTAINER_CACHEDIR $APPTAINER_TMPDIR
+
+
 if [ "$SLURM_JOB_PARTITION" == "gpu_h100" ]; then
     # Known issue on Snellius. NCCL sometimes hangs during initialization.
     # Workaround: set NCCL_SOCKET_IFNAME to the ethernet interface for initialization.
     echo "Using H100 partition on Snellius, setting NCCL_SOCKET_IFNAME to eno2np0"
     export NCCL_SOCKET_IFNAME="eno2np0"
     SERVER="SNLSh"
+    export WANDB_MODE=online
 
 elif [ "$SLURM_JOB_PARTITION" == "gpu_a100" ]; then
     echo "Using A100 partition on Snellius, setting NCCL_SOCKET_IFNAME to eno1np0"
     export NCCL_SOCKET_IFNAME="eno1np0"
     SERVER="SNLSa"
+    export WANDB_MODE=online
 
 # ${SYSTEMNAME:-} expans to an empty string if SYSTEMNAME is not set
 elif [[ "${SYSTEMNAME:-}" == juwelsbooster ]]; then
@@ -102,13 +114,15 @@ elif [[ "${SYSTEMNAME:-}" == juwelsbooster ]]; then
 
     # Found as example here: https://apps.fz-juelich.de/jsc/hps/juwels/batchsystem.html#writing-a-batch-script
     # export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}    # gives error: libgomp: Invalid value for environment variable OMP_NUM_THREADS: 
+
+    export WANDB_MODE=offline
+
 elif [[ "$SLURM_CLUSTER_NAME" = leonardo ]]; then
     echo "Using Leonardo booster partition"
     SERVER="LRDN"
+    export WANDB_MODE=offline
 fi 
 
-
-N_PARAMS="1.31"
 
 TOTAL_GPUS=$((SLURM_NNODES * SLURM_GPUS_PER_NODE))
 
@@ -240,7 +254,7 @@ LR_WARMUP_SAMPLES=$((LR_WARMUP_ITERS*GLOBAL_BATCH_SIZE))
 
 DATA_ARGS=(
     --data-path "$DATA_PATH"
-    --data-cache-path "$DATA_CACHE_PATH"
+    --data-cache-path "$MEGATRON_CACHE_FOLDER"
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model "$TOKENIZER_MODEL"
     --make-vocab-size-divisible-by 128
@@ -340,43 +354,31 @@ DATASET=fineweb
 MODEL=megatron-ar
 SL_NAME=""
 GAS_NAME=""
-if [ -n "$SEQ_LENGTH" ]; then
+if [ "${SEQ_LENGTH:-}" ]; then
     SL_NAME="-${SEQ_LENGTH}sl"
 fi
-if [ -n "$GAS" ]; then
+if [ "${GAS:-}" ]; then
     GAS_NAME="-${GAS}gas"
 fi
 
 JOB_NAME="${SERVER}-${SLURM_JOB_ID}-${N_PARAMS}B-${TOTAL_GPUS}gpu-${MICRO_BATCH_SIZE}mbs-${DATASET}-${MODEL}${SL_NAME}${GAS_NAME}"
+echo "Job name: $JOB_NAME"
 
 
-export WANDB_ENTITY=oellm-team
-
-if [ -n "$WANDB_API_KEY" ]; then
-    WANDB_DIR="$OUTPUT_DIR/wandb/$SLURM_JOB_NAME-$SLURM_JOBID"
+if [ "${WANDB_API_KEY:-}" ]; then
+    
     WANDB_ARGS=(
-        --wandb-project "dense"
+        --wandb-project $WASNDB_PROJECT
         --wandb-exp-name $JOB_NAME
         --wandb-save-dir $WANDB_DIR
     )
-    export WANDB_DATA_DIR=$SCRATCH/wandb
-    export WANDB_CACHE_DIR=$SCRATCH/wandb-cache
+    export WANDB_DATA_DIR=$CACHE_DIR/wandb
+    export WANDB_CACHE_DIR=$CACHE_DIR/wandb-cache
 mkdir -p $WANDB_CACHE_DIR
 
     mkdir -p $WANDB_DATA_DIR
 else
     WANDB_ARGS=()
-fi
-
-if [[ "$SYSTEMNAME" = "juwelsbooster" || \
-      "$SYSTEMNAME" = "juwels"        || \
-      "$SYSTEMNAME" = "jurecadc"      || \
-      "$SYSTEMNAME" = "jusuf" ]]; then
-
-    export WANDB_MODE=offline
-else
-    # Other clusters (e.g. Snellius)
-    export WANDB_MODE=online
 fi
 
 
@@ -415,18 +417,7 @@ CHECKPOINT_ARGS=(
     --save-interval $SAVE_INTERVAL
 )
 
-COMMAND=" \
-    Megatron-LM/pretrain_gpt.py \
-    "${MODEL_ARGS[@]}" \
-    "${OPTIMIZER_ARGS[@]}" \
-    "${PARALLEL_ARGS[@]}" \
-    "${OUTPUT_ARGS[@]}" \
-    "${CHECKPOINT_ARGS[@]}" \
-    "${DATA_ARGS[@]}" \
-    "${PROFILE_ARGS[@]}" \
-    "${WANDB_ARGS[@]}" \
 
-"
 
 ######################################################################
 #
@@ -435,22 +426,40 @@ COMMAND=" \
 #
 ######################################################################
 
-echo '============= COMMAND: ============='
-echo "$COMMAND"
-echo '===================================='
+# Command
+COMMAND=" ${MEGATRON_PATH}/pretrain_gpt.py \
+    "${MODEL_ARGS[@]}" \
+    "${OPTIMIZER_ARGS[@]}" \
+    "${PARALLEL_ARGS[@]}" \
+    "${OUTPUT_ARGS[@]}" \
+    "${CHECKPOINT_ARGS[@]}" \
+    "${DATA_ARGS[@]}" \
+    "${PROFILE_ARGS[@]}" \
+    "${WANDB_ARGS[@]}" \
+"
 
 echo "START $SLURM_JOBID: $(date)"
 echo "SLURM_NNODES: $SLURM_NNODES"
 
-srun \
-    --label \
-    apptainer exec \
+
+LAUNCHER="singularity exec \
     --nv \
-    --no-home \
-    -B "$BASE_DIR" \
-    -B "$BIND_DIRS" \
-    "$CONTAINER" \
-    "$LAUNCH_SCRIPT" \
-    $COMMAND
+    --bind $BIND_DIRS \
+    $CONTAINER \
+    python -u -m torch.distributed.run \
+        --nproc-per-node $SLURM_GPUS_PER_NODE \
+        --nnodes $SLURM_NNODES \
+        --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT \
+        --rdzv_backend static \
+        --max_restarts 0 \
+        --tee 3"
+
+srun \
+    --wait=60 \
+    --cpus-per-task=$SLURM_CPUS_PER_TASK \
+    --threads-per-core=1 \
+    --kill-on-bad-exit=1 \
+    --jobid $SLURM_JOB_ID \
+    bash -c "$LAUNCHER --node_rank \$SLURM_PROCID --role \$SLURMD_NODENAME: $COMMAND"
 
 echo "END $SLURM_JOBID: $(date)"
