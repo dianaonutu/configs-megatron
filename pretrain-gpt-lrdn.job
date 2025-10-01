@@ -6,12 +6,12 @@
 #SBATCH --nodes=1       
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg
-#SBATCH --time=20:00
+#SBATCH --time=30:00
 #SBATCH --gpus-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --threads-per-core=1
-#SBATCH --output=/leonardo_scratch/large/userexternal/donutu00/logs/slurm_logs/megatron/%j.out
-#SBATCH --error=/leonardo_scratch/large/userexternal/donutu00/logs/slurm_logs/megatron/%j.err
+#SBATCH --output=/leonardo_scratch/large/userexternal/donutu00/megatron/slurm_logs/%j.out
+#SBATCH --error=/leonardo_scratch/large/userexternal/donutu00/megatron/slurm_logs/%j.err
 
 
 # For quick tests on max 2 nodes: #SBATCH --qos=boost_qos_dbg
@@ -66,7 +66,6 @@ CONTAINER=$PROJECT_SPACE/containers/megatron-torch-2.7-nvcr.25-04.sif
 MEGATRON_CACHE_FOLDER="${OUTPUT_DIR}/megatron_cache"
 CHECKPOINT_PATH="$OUTPUT_DIR/checkpoints"
 TENSORBOARD_DIR="$OUTPUT_DIR/tensorboard/$SLURM_JOB_NAME-$SLURM_JOBID"
-WANDB_DIR="$OUTPUT_DIR/wandb/$SLURM_JOB_NAME-$SLURM_JOBID"
 
 mkdir -p "$OUTPUT_DIR" "$CHECKPOINT_PATH" "$MEGATRON_CACHE_FOLDER"   # This needs to exist
 
@@ -366,17 +365,15 @@ echo "Job name: $JOB_NAME"
 
 
 if [ "${WANDB_API_KEY:-}" ]; then
+    WANDB_DIR="$OUTPUT_DIR/wandb/$JOB_NAME"
+    mkdir -p $WANDB_DIR
     
     WANDB_ARGS=(
-        --wandb-project $WASNDB_PROJECT
+        --wandb-entity $WANDB_ENTITY
+        --wandb-project $WANDB_PROJECT
         --wandb-exp-name $JOB_NAME
         --wandb-save-dir $WANDB_DIR
     )
-    export WANDB_DATA_DIR=$CACHE_DIR/wandb
-    export WANDB_CACHE_DIR=$CACHE_DIR/wandb-cache
-mkdir -p $WANDB_CACHE_DIR
-
-    mkdir -p $WANDB_DATA_DIR
 else
     WANDB_ARGS=()
 fi
